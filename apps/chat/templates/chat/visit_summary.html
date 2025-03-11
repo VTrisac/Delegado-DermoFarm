@@ -1,0 +1,267 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Resumen de Visita{% endblock %}
+
+{% block content %}
+<div class="visit-summary-container">
+    <h1 class="title">Resumen de Visita</h1>
+    
+    {% if messages %}
+    <div class="messages">
+        {% for message in messages %}
+        <div class="alert alert-{% if message.tags %}{{ message.tags }}{% else %}info{% endif %}">
+            {{ message }}
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    
+    <div class="summary-section">
+        <h2>Datos de la Farmacia</h2>
+        <div class="pharmacy-info">
+            <p><strong>Nombre:</strong> <span id="pharmacy-name">{{ visit.pharmacy.name }}</span></p>
+            <p><strong>Dirección:</strong> <span id="pharmacy-address">{{ visit.pharmacy.address }}</span></p>
+            <p><strong>Teléfono:</strong> <span id="pharmacy-phone">{{ visit.pharmacy.phone|default:"No disponible" }}</span></p>
+            <p><strong>Email:</strong> <span id="pharmacy-email">{{ visit.pharmacy.email|default:"No disponible" }}</span></p>
+        </div>
+        
+        <h2>Detalles de la Visita</h2>
+        <div class="visit-info">
+            <p><strong>Fecha:</strong> {{ visit.visit_date|date:"d/m/Y H:i" }}</p>
+            <p><strong>Estado:</strong> {{ visit.get_status_display }}</p>
+            <p><strong>Delegado:</strong> {{ visit.delegate.name }}</p>
+        </div>
+        
+        <div class="feedback-section">
+            <h2>Feedback de la Visita</h2>
+            <form id="feedbackForm" method="post" enctype="multipart/form-data">
+                {% csrf_token %}
+                <div class="form-group">
+                    <label for="feedback_type">Tipo de Feedback:</label>
+                    <select id="feedback_type" name="feedback_type" class="form-control" required>
+                        <option value="TEXT">Texto</option>
+                        <option value="AUDIO">Audio</option>
+                    </select>
+                </div>
+                
+                <div id="textFeedback" class="form-group">
+                    <label for="feedback_text">Feedback en Texto:</label>
+                    <textarea id="feedback_text" name="feedback_text" class="form-control" rows="4"></textarea>
+                </div>
+                
+                <div id="audioFeedback" class="form-group" style="display: none;">
+                    <label for="audio_file">Archivo de Audio:</label>
+                    <input type="file" id="audio_file" name="audio_file" class="form-control" accept="audio/*">
+                    <button type="button" id="recordAudio" class="btn btn-secondary">
+                        <i class="fas fa-microphone"></i> Grabar Audio
+                    </button>
+                </div>
+            </form>
+            
+            <div class="existing-feedback">
+                <h3>Feedback Anterior</h3>
+                {% for feedback in visit.feedbacks.all %}
+                <div class="feedback-item">
+                    <p><strong>Tipo:</strong> {{ feedback.get_feedback_type_display }}</p>
+                    {% if feedback.feedback_text %}
+                        <p>{{ feedback.feedback_text }}</p>
+                    {% endif %}
+                    {% if feedback.audio_file %}
+                        <audio controls src="{{ feedback.audio_file.url }}"></audio>
+                    {% endif %}
+                    <small>{{ feedback.created_at|date:"d/m/Y H:i" }}</small>
+                </div>
+                {% empty %}
+                <p>No hay feedback registrado</p>
+                {% endfor %}
+            </div>
+        </div>
+        
+        <div class="next-visit-section">
+            <h2>Próxima Visita</h2>
+            <form id="nextVisitForm">
+                <div class="form-group">
+                    <label for="next_visit_date">Fecha Próxima Visita:</label>
+                    <input type="datetime-local" id="next_visit_date" name="next_visit_date" 
+                           class="form-control" value="{{ visit.next_visit_date|date:'Y-m-d\TH:i' }}">
+                </div>
+                <div class="form-group">
+                    <label for="next_visit_reminder">Notas para Próxima Visita:</label>
+                    <textarea id="next_visit_reminder" name="next_visit_reminder" 
+                              class="form-control" rows="3">{{ visit.next_visit_reminder }}</textarea>
+                </div>
+            </form>
+        </div>
+        
+        <div class="actions">
+            <button type="button" class="btn btn-secondary" onclick="history.back()">Volver</button>
+            <button type="button" class="btn btn-primary" onclick="saveVisitData()">Guardar</button>
+            {% if not visit.summary_confirmed %}
+                <button type="button" class="btn btn-success" onclick="confirmVisit()">Confirmar Visita</button>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<style>
+    .visit-summary-container {
+        max-width: 800px;
+        margin: 2rem auto;
+        padding: 2rem;
+        background: white;
+        border-radius: 15px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .title {
+        text-align: center;
+        color: #2c3e50;
+        margin-bottom: 2rem;
+    }
+    
+    .summary-section {
+        margin-bottom: 2rem;
+    }
+    
+    .form-group {
+        margin-bottom: 1rem;
+    }
+    
+    .feedback-item {
+        background: #f8f9fa;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        border-radius: 8px;
+    }
+    
+    .actions {
+        display: flex;
+        gap: 1rem;
+        justify-content: flex-end;
+        margin-top: 2rem;
+    }
+    
+    audio {
+        width: 100%;
+        margin: 0.5rem 0;
+    }
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Toggle between text and audio feedback
+    const feedbackType = document.getElementById('feedback_type');
+    const textFeedback = document.getElementById('textFeedback');
+    const audioFeedback = document.getElementById('audioFeedback');
+    
+    feedbackType.addEventListener('change', function() {
+        if (this.value === 'TEXT') {
+            textFeedback.style.display = 'block';
+            audioFeedback.style.display = 'none';
+        } else {
+            textFeedback.style.display = 'none';
+            audioFeedback.style.display = 'block';
+        }
+    });
+    
+    // Audio recording functionality
+    let mediaRecorder;
+    let audioChunks = [];
+    const recordButton = document.getElementById('recordAudio');
+    
+    recordButton.addEventListener('click', async () => {
+        if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    audioChunks.push(event.data);
+                };
+                
+                mediaRecorder.onstop = () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    const file = new File([audioBlob], 'feedback.wav', { type: 'audio/wav' });
+                    
+                    const dataTransfer = new DataTransfer();
+                    dataTransfer.items.add(file);
+                    document.getElementById('audio_file').files = dataTransfer.files;
+                    
+                    audioChunks = [];
+                };
+                
+                mediaRecorder.start();
+                recordButton.innerHTML = '<i class="fas fa-stop"></i> Detener Grabación';
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                alert('Error al acceder al micrófono. Asegúrate de dar permisos de grabación.');
+            }
+        } else {
+            mediaRecorder.stop();
+            recordButton.innerHTML = '<i class="fas fa-microphone"></i> Grabar Audio';
+        }
+    });
+});
+
+async function saveVisitData() {
+    const formData = new FormData();
+    const feedbackType = document.getElementById('feedback_type').value;
+    
+    formData.append('visit_id', '{{ visit.id }}');
+    formData.append('feedback_type', feedbackType);
+    
+    if (feedbackType === 'TEXT') {
+        formData.append('feedback_text', document.getElementById('feedback_text').value);
+    } else {
+        const audioFile = document.getElementById('audio_file').files[0];
+        if (audioFile) {
+            formData.append('audio_file', audioFile);
+        }
+    }
+    
+    try {
+        const response = await fetch('{% url "submit_visit_feedback" %}', {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            }
+        });
+        
+        if (response.ok) {
+            alert('Feedback guardado exitosamente');
+            location.reload();
+        } else {
+            const data = await response.json();
+            alert('Error al guardar: ' + (data.error || 'Error desconocido'));
+        }
+    } catch (err) {
+        console.error('Error saving feedback:', err);
+        alert('Error al guardar el feedback');
+    }
+}
+
+async function confirmVisit() {
+    try {
+        const response = await fetch('{% url "confirm_visit_summary" visit.id %}', {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            }
+        });
+        
+        if (response.ok) {
+            alert('Visita confirmada exitosamente');
+            location.reload();
+        } else {
+            const data = await response.json();
+            alert('Error al confirmar: ' + (data.error || 'Error desconocido'));
+        }
+    } catch (err) {
+        console.error('Error confirming visit:', err);
+        alert('Error al confirmar la visita');
+    }
+}
+</script>
+{% endblock %}

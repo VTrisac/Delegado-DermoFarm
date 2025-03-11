@@ -1,0 +1,184 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Términos y Condiciones{% endblock %}
+
+{% block content %}
+<div class="terms-container">
+    <h1 class="title">Términos y Condiciones de Uso</h1>
+    
+    {% if messages %}
+    <div class="messages">
+        {% for message in messages %}
+        <div class="alert alert-{% if message.tags %}{{ message.tags }}{% else %}info{% endif %}">
+            {{ message }}
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    
+    <div class="delegate-info">
+        <p>Delegado: <strong>{{ delegate.name }}</strong> ({{ delegate.code }})</p>
+    </div>
+    
+    <div class="terms-content">
+        <h2>Condiciones de Uso del Sistema de Chat</h2>
+        
+        <div class="terms-text">
+            <p>Estimado delegado, antes de utilizar nuestro sistema de chat, por favor lea detenidamente los siguientes términos y condiciones:</p>
+            
+            <h3>1. Confidencialidad</h3>
+            <p>Toda la información intercambiada a través de este sistema es confidencial y no debe ser compartida con terceros sin autorización previa.</p>
+            
+            <h3>2. Uso Apropiado</h3>
+            <p>El sistema de chat debe ser utilizado exclusivamente para consultas profesionales relacionadas con productos y servicios de la empresa.</p>
+            
+            <h3>3. Protección de Datos</h3>
+            <p>Los datos personales serán tratados conforme a nuestra política de privacidad y en cumplimiento con las leyes de protección de datos vigentes.</p>
+            
+            <h3>4. Limitación de Responsabilidad</h3>
+            <p>La empresa no se hace responsable por información errónea o incompleta proporcionada a través del sistema de chat.</p>
+            
+            <h3>5. Monitoreo</h3>
+            <p>Las conversaciones pueden ser monitoreadas con fines de calidad y capacitación.</p>
+            
+            <h3>6. Finalización</h3>
+            <p>La empresa se reserva el derecho de finalizar el acceso al sistema en cualquier momento y por cualquier motivo.</p>
+        </div>
+        
+        <form method="post" class="terms-form">
+            {% csrf_token %}
+            <div class="form-check">
+                <input type="checkbox" id="accept_terms" name="accept_terms" class="form-check-input" required>
+                <label for="accept_terms" class="form-check-label">He leído y acepto los términos y condiciones de uso</label>
+            </div>
+            <div class="form-actions">
+                <a href="{% url 'login' %}" class="btn btn-secondary">Regresar</a>
+                <button type="submit" class="btn btn-primary">Continuar</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<style>
+    .terms-container {
+        max-width: 800px;
+        margin: 2rem auto;
+        padding: 2rem;
+        background: white;
+        border-radius: 15px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .title {
+        text-align: center;
+        color: #2c3e50;
+        font-size: 2rem;
+        margin-bottom: 2rem;
+    }
+    
+    .delegate-info {
+        background-color: #f8fafc;
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+    }
+    
+    .terms-content {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+    }
+    
+    .terms-text {
+        max-height: 400px;
+        overflow-y: auto;
+        padding: 1rem;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        background-color: #f9fafb;
+    }
+    
+    .form-check {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    
+    .form-check-input {
+        width: 20px;
+        height: 20px;
+    }
+    
+    .form-check-label {
+        font-weight: 500;
+    }
+    
+    .form-actions {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 1rem;
+    }
+    
+    .btn {
+        padding: 0.75rem 1.5rem;
+        border: none;
+        border-radius: 8px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background-color 0.2s;
+    }
+    
+    .btn-primary {
+        background-color: #2563eb;
+        color: white;
+    }
+    
+    .btn-primary:hover {
+        background-color: #1d4ed8;
+    }
+    
+    .btn-secondary {
+        background-color: #94a3b8;
+        color: white;
+        text-decoration: none;
+    }
+    
+    .btn-secondary:hover {
+        background-color: #64748b;
+    }
+    
+    .messages {
+        margin-bottom: 1rem;
+    }
+    
+    .alert {
+        padding: 1rem;
+        margin-bottom: 1rem;
+        border-radius: 5px;
+        color: white;
+    }
+    
+    .alert-error {
+        background-color: #e74c3c;
+    }
+    
+    .alert-success {
+        background-color: #2ecc71;
+    }
+    
+    .alert-info {
+        background-color: #3498db;
+    }
+    
+    .alert-warning {
+        background-color: #f1c40f;
+    }
+    
+    h3 {
+        margin-top: 1rem;
+        color: #334155;
+    }
+</style>
+{% endblock %}

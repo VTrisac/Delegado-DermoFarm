@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - AgenteGen</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background-color: #f0f4f8;
+            margin: 0;
+            padding: 0;
+        }
+        .navbar {
+            background-color: #2c3e50;
+            padding: 1rem 2rem;
+        }
+        .navbar-brand {
+            color: white;
+            font-size: 1.5rem;
+            font-weight: bold;
+            text-decoration: none;
+        }
+        .navbar-nav {
+            display: flex;
+            list-style-type: none;
+            margin: 0;
+            padding: 0;
+        }
+        .nav-item {
+            margin-left: 1rem;
+        }
+        .nav-link {
+            color: #ecf0f1;
+            text-decoration: none;
+            transition: color 0.3s ease;
+        }
+        .nav-link:hover {
+            color: #3498db;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 2rem auto;
+            padding: 2rem;
+        }
+        .title {
+            text-align: center;
+            color: #2c3e50;
+            font-size: 2.5rem;
+            margin-bottom: 2rem;
+        }
+        .row {
+            display: flex;
+            justify-content: space-between;
+            gap: 1.5rem;
+        }
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 2rem;
+            flex: 1;
+            box-shadow: 0 8px 15px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-10px);
+        }
+        .card-title {
+            font-size: 1.2rem;
+            margin-bottom: 1rem;
+            color: white;
+        }
+        .card-text {
+            font-size: 2.5rem;
+            font-weight: bold;
+            margin: 0;
+            color: white;
+        }
+        .bg-primary { background-color: #3498db; }
+        .bg-success { background-color: #2ecc71; }
+        .bg-warning { background-color: #f1c40f; }
+        @media (max-width: 768px) {
+            .row {
+                flex-direction: column;
+            }
+            .navbar-nav {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .nav-item {
+                margin: 0.5rem 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">AgenteGen</a>
+            <ul class="navbar-nav">
+                <li class="nav-item"><a class="nav-link" href="/dashboard">Dashboard</a></li>
+                <li class="nav-item"><a class="nav-link" href="/chat">Chat</a></li>
+                <li class="nav-item"><a class="nav-link" href="/agents">Delegados</a></li>
+                <li class="nav-item"><a class="nav-link" href="/logout">Salir</a></li>
+            </ul>
+        </div>
+    </nav>
+    <div class="container">
+        <h1 class="title">Dashboard de AgenteGen</h1>
+        <div class="row">
+            <div class="card bg-primary">
+                <div class="card-body">
+                    <h5 class="card-title">Total de Conversaciones</h5>
+                    <p class="card-text">{{ total_conversations }}</p>
+                </div>
+            </div>
+            <div class="card bg-success">
+                <div class="card-body">
+                    <h5 class="card-title">Agentes Activos</h5>
+                    <p class="card-text">{{ active_agents }}</p>
+                </div>
+            </div>
+            <div class="card bg-warning">
+                <div class="card-body">
+                    <h5 class="card-title">Mensajes Hoy</h5>
+                    <p class="card-text">{{ messages_today }}</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
