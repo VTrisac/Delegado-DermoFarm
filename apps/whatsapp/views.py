@@ -1,20 +1,20 @@
+import requests
 from rest_framework.permissions import IsAuthenticated
 from oauth2_provider.contrib.rest_framework import TokenHasScope
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from django.views.decorators.csrf import csrf_exempt
+from django.conf import settings
+from django.utils import timezone
+from django.core.cache import cache
 from django.http import JsonResponse, HttpResponse
 from apps.chat.models import Message, Conversation
 from apps.whatsapp.models import WhatsAppMessage, WhatsAppLog
 from apps.whatsapp.services import WhatsAppService
 from apps.whatsapp.tasks import handle_whatsapp_message
-from django.utils import timezone
-from django.conf import settings
 import json
 import logging
 import traceback
-import requests
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -47,17 +47,8 @@ def approve_message(request, message_id):
 @csrf_exempt
 def webhook_handler(request):
     """
-    Handle incoming WhatsApp messages through webhook.
-    This is the main entry point for messages from WhatsApp into our unified chat system.
-    
-    Supports multiple message types:
-    - Text messages
-    - Media messages (images, audio, video, documents)
-    - Location messages
-    - Status updates (delivered, read, failed)
-    - Verification requests from the WhatsApp API
+    Handle incoming WhatsApp messages through webhook with improved efficiency.
     """
-    # Initialize WhatsApp service
     whatsapp_service = WhatsAppService()
     
     # Handle GET request for webhook verification
@@ -72,64 +63,93 @@ def webhook_handler(request):
             logger.info("Webhook verified successfully")
             return HttpResponse(challenge, status=200)
         
-        logger.warning(f"Failed webhook verification: mode={mode}, token={token}")
+        logger.warning(f"Failed webhook verification: mode={mode}")
         return HttpResponse("Verification Failed", status=403)
     
-    # Handle POST request with incoming messages or status updates
+    # Handle POST request with incoming messages
     if request.method == "POST":
         try:
-            # Verificar firma del webhook para seguridad
+            # Rate limiting check using cache
+            client_ip = request.META.get('REMOTE_ADDR')
+            rate_key = f'whatsapp_rate_{client_ip}'
+            request_count = cache.get(rate_key, 0)
+            
+            if request_count >= 100:  # Max 100 requests per minute
+                logger.warning(f"Rate limit exceeded for {client_ip}")
+                return HttpResponse("Rate limit exceeded", status=429)
+            
+            cache.set(rate_key, request_count + 1, timeout=60)
+            
+            # Verify webhook signature
             if not whatsapp_service.verify_webhook_signature(request):
                 logger.warning("Invalid webhook signature")
                 return HttpResponse("Invalid signature", status=403)
             
-            # Parse the incoming webhook data
+            # Parse webhook data
             try:
                 body = request.body.decode('utf-8')
                 data = json.loads(body)
-                logger.info(f"Received WhatsApp webhook: {json.dumps(data)[:500]}")
+                logger.debug(f"Received webhook data: {json.dumps(data)[:500]}")
             except json.JSONDecodeError as e:
                 logger.error(f"Invalid JSON in webhook: {str(e)}")
                 return HttpResponse("Invalid JSON", status=400)
             
-            # Procesar los mensajes recibidos
-            processed_messages = whatsapp_service.parse_webhook_data(data)
-            
-            # Si no hay mensajes, podría ser una actualización de estado o un evento que no necesita respuesta
-            if not processed_messages:
+            # Process messages in batches
+            messages = whatsapp_service.parse_webhook_data(data)
+            if not messages:
                 return HttpResponse("No messages to process", status=200)
-                
-            # Procesar cada mensaje
-            for msg in processed_messages:
+            
+            # Group messages by conversation for bulk processing
+            conversation_messages = {}
+            for msg in messages:
+                sender = msg['from']
+                if sender not in conversation_messages:
+                    conversation_messages[sender] = []
+                conversation_messages[sender].append(msg)
+            
+            # Process each conversation's messages in bulk
+            for sender, msgs in conversation_messages.items():
                 try:
-                    # Manejar el mensaje entrante según su tipo
-                    sender_phone = msg['from']
-                    message_content = msg['content']
-                    message_id = msg['id']
+                    # Find or create conversation once per sender
+                    conversation = Conversation.objects.filter(
+                        client_phone=sender,
+                        is_active=True
+                    ).first()
                     
-                    # Procesar el mensaje a través de nuestro sistema
-                    user_message, conversation = whatsapp_service.handle_incoming_message(
-                        sender_phone=sender_phone,
-                        message_content=message_content,
-                        message_sid=message_id
-                    )
+                    if not conversation:
+                        from apps.agents.models import AgentProfile
+                        agent = AgentProfile.objects.filter(is_active=True).first()
+                        if not agent:
+                            logger.error("No active agents available")
+                            continue
+                        
+                        conversation = Conversation.objects.create(
+                            agent=agent,
+                            client_phone=sender,
+                            is_active=True
+                        )
                     
-                    logger.info(f"Successfully processed WhatsApp message from {sender_phone} into conversation {conversation.id}")
-                    
-                except Exception as msg_error:
-                    logger.error(f"Error processing individual WhatsApp message: {str(msg_error)}")
-                    logger.error(traceback.format_exc())
-                    # Continuamos con el siguiente mensaje
-                    
-            # Retornar éxito
-            return HttpResponse("Message(s) processed", status=200)
+                    # Process messages for this conversation
+                    for msg in msgs:
+                        handle_whatsapp_message.delay({
+                            'id': msg['id'],
+                            'from': sender,
+                            'content': msg['content'],
+                            'conversation_id': conversation.id
+                        })
+                        
+                except Exception as e:
+                    logger.error(f"Error processing messages for {sender}: {str(e)}")
+                    continue
+            
+            return HttpResponse("Messages queued for processing", status=200)
             
         except Exception as e:
-            logger.error(f"Error in WhatsApp webhook handler: {str(e)}")
+            logger.error(f"Error in webhook handler: {str(e)}")
             logger.error(traceback.format_exc())
-            return HttpResponse("Internal server error", status=200)  # Siempre retornar 200 para evitar reintentos
-
-    # Método no admitido
+            # Always return 200 to prevent retries from WhatsApp
+            return HttpResponse("Error processing webhook", status=200)
+    
     return HttpResponse("Method not allowed", status=405)
 
 @api_view(["GET"])

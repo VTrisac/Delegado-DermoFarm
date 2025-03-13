@@ -1,6 +1,6 @@
 from django.contrib import admin
 from .models import (
-    Conversation, Message, InteractionLog, Pharmacy, 
+    Conversation, Message, Pharmacy, 
     Visit, Feedback, Delegate, QuestionCategory, 
     Question, Answer, QAInteraction
 )
@@ -23,9 +23,9 @@ class QuestionAdmin(admin.ModelAdmin):
 
 @admin.register(Answer)
 class AnswerAdmin(admin.ModelAdmin):
-    list_display = ('question', 'text', 'is_default')
+    list_display = ('question', 'content', 'is_default')
     list_filter = ('is_default',)
-    search_fields = ('text',)
+    search_fields = ('content',)
     raw_id_fields = ('question',)
 
 @admin.register(QAInteraction)
@@ -34,12 +34,11 @@ class QAInteractionAdmin(admin.ModelAdmin):
     list_filter = ('success_rate',)
     search_fields = ('user_query',)
     date_hierarchy = 'created_at'
-    raw_id_fields = ('matched_question', 'provided_answer', 'conversation', 'delegate')
+    raw_id_fields = ('matched_question', 'provided_answer', 'conversation')
 
 # Register other existing models
 admin.site.register(Conversation)
 admin.site.register(Message)
-admin.site.register(InteractionLog)
 admin.site.register(Pharmacy)
 admin.site.register(Visit)
 admin.site.register(Feedback)

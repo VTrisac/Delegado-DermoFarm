@@ -4,10 +4,10 @@ import re
 from django.conf import settings
 from typing import Dict, Any, Optional, Tuple, List
 from django.db.models import Q
-from apps.chat.models import InteractionLog, Message, Conversation, Pharmacy, Visit, Feedback, Delegate
-from apps.chat.models import Question, Answer, QAInteraction, QuestionCategory
+from apps.chat.models import Answer, Message, Conversation, Pharmacy, QAInteraction, Question, Visit, Feedback, Delegate
 import logging
-from difflib import SequenceMatcher
+
+from apps.whatsapp.services import WhatsAppService
 
 logger = logging.getLogger(__name__)
 
@@ -613,6 +613,37 @@ class ChatProcessor:
         # Default fallback
         return 'unknown'
     
+    def process_outgoing_message(self, message: Message) -> bool:
+        """Process outgoing message and send to WhatsApp if needed."""
+        try:
+            # Check if this is a WhatsApp conversation
+            if message.conversation.client_phone and message.conversation.client_phone.startswith('+'):
+                whatsapp_service = WhatsAppService()
+                # Prepare and send message via WhatsApp
+                content = self.prepare_message_for_whatsapp(message.content)
+                whatsapp_msg = whatsapp_service.send_message(
+                    phone_number=message.conversation.client_phone,
+                    content=content,
+                    conversation_id=message.conversation.id
+                )
+                return bool(whatsapp_msg)
+            return True
+        except Exception as e:
+            logger.error(f"Error processing outgoing message: {str(e)}")
+            return False
+
+    def prepare_message_for_whatsapp(self, content: str) -> str:
+        """Prepare message content for WhatsApp format."""
+        # Truncate if too long
+        if len(content) > 4000:
+            content = content[:3997] + "..."
+        
+        # Clean formatting
+        content = content.replace('**', '*')  # Convert markdown bold to WhatsApp bold
+        content = content.replace('__', '_')  # Convert markdown italic to WhatsApp italic
+        
+        return content.strip()
+    
     def process_message(self, message_obj: Message) -> Tuple[bool, Optional[str]]:
         """
         Process a message and generate a response using the following sequence:
@@ -629,7 +660,7 @@ class ChatProcessor:
             
             if qa_result['success']:
                 # We found a matching question and answer
-                logger.info(f"Found matching Q&A with confidence {qa_result['confidence']}")
+                logger.info(f"Found matching Q&A questions: {qa_result['question_id']}, confidence: {qa_result['confidence']}")
                 
                 # Update original message to mark as processed
                 message_obj.ai_processed = True
@@ -732,40 +763,14 @@ class ChatProcessor:
         # Create placeholder for AI response
         placeholder = Message.objects.create(
             conversation=conversation,
-            content="Procesando respuesta...",
+            content="He encontrado lo que estás buscando...",
             direction='OUT'
         )
         
-        # Store the source as metadata on the message
-        # This allows different processing strategies based on source
-        InteractionLog.objects.create(
-            message=user_message,
-            ai_response=f"Source: {source}"
-        )
+        # Log the source information using the standard logger
+        logger.info(f"Message {user_message.id} processed from source: {source}")
         
         return user_message, placeholder
-    
-    def prepare_message_for_whatsapp(self, content: str) -> str:
-        """
-        Prepare a message to be sent via WhatsApp
-        - Format text appropriately for WhatsApp
-        - Handle length limits and other constraints
-        """
-        # Basic WhatsApp formatting
-        # Max length for WhatsApp is around 4096 chars
-        if len(content) > 4000:
-            content = content[:3997] + "..."
-            
-        # Ensure proper formatting for WhatsApp
-        # Replace multiple newlines with just two
-        content = re.sub(r'\n{3,}', '\n\n', content)
-        
-        # Convert markdown style formatting to WhatsApp formatting
-        # WhatsApp uses *bold*, _italic_, and ~strikethrough~
-        content = re.sub(r'\*\*(.*?)\*\*', r'*\1*', content)  # Convert **bold** to *bold*
-        content = re.sub(r'__(.*?)__', r'_\1_', content)      # Convert __italic__ to _italic_
-        
-        return content
 
 class QAService:
     """
@@ -838,13 +843,20 @@ class QAService:
         questions = Question.objects.filter(is_active=True)
         
         for question in questions:
-            question_text = self._normalize_text(question.text)
-            similarity = SequenceMatcher(None, query, question_text).ratio()
+            # Simple text similarity using word overlap
+            question_words = set(question.text.lower().split())
+            query_words = set(query.lower().split())
+            
+            # Calculate Jaccard similarity
+            intersection = len(question_words.intersection(query_words))
+            union = len(question_words.union(query_words))
+            similarity = intersection / union if union > 0 else 0
+            
             if similarity > 0:
                 results.append((question, similarity))
-                
+        
         return results
-    
+
     def get_answer(self, question: Question) -> Optional[str]:
         """Get the best answer for a given question"""
         # First try to get the default answer

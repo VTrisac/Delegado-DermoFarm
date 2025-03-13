@@ -1,493 +1,280 @@
-from datetime import timezone, datetime
-from celery import shared_task
-# Eliminada la importación de Twilio
-import requests
-from django.conf import settings
-from apps.chat.services import ChatProcessor
-from apps.chat.models import Message, Conversation
-from apps.whatsapp.models import WhatsAppMessage, WhatsAppLog
-import logging
-import re
-import uuid
 import json
 import hmac
 import hashlib
+import logging
+import requests
+from functools import wraps
+from time import sleep
+from django.conf import settings
+from django.core.cache import cache
+from django.utils import timezone
+from requests.exceptions import RequestException
+from .models import WhatsAppMessage, WhatsAppLog
+from apps.chat.models import Message, Conversation
 
 logger = logging.getLogger(__name__)
 
+def retry_on_failure(max_retries=3, delay=1):
+    """Decorator to retry API calls on failure with exponential backoff."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        sleep_time = delay * (2 ** attempt)  # Exponential backoff
+                        logger.warning(
+                            f"Attempt {attempt + 1} failed for {func.__name__}. "
+                            f"Retrying in {sleep_time} seconds... Error: {str(e)}"
+                        )
+                        sleep(sleep_time)
+            
+            logger.error(
+                f"All {max_retries} attempts failed for {func.__name__}. "
+                f"Final error: {str(last_exception)}"
+            )
+            raise last_exception
+        return wrapper
+    return decorator
+
 class WhatsAppService:
-    """
-    Service for handling all WhatsApp-related functionality:
-    - Sending messages via WhatsApp API
-    - Receiving messages from WhatsApp webhook
-    - Tracking message status
-    - Integrating with the unified chat system
-    """
+    """Service class for handling WhatsApp message interactions."""
     
     def __init__(self):
-        # Cargar configuraciones desde settings
         self.api_url = settings.WHATSAPP_API_URL
         self.api_token = settings.WHATSAPP_API_TOKEN
         self.webhook_secret = settings.WHATSAPP_WEBHOOK_SECRET
-        self.whatsapp_phone_id = settings.WHATSAPP_PHONE_ID
-        self.whatsapp_number = settings.WHATSAPP_PHONE_NUMBER
+        self.cache_timeout = 3600  # 1 hour
         
-    def send_message(self, phone_number, content, conversation_id=None):
+    def _get_headers(self):
+        """Get headers for API requests with proper authentication."""
+        return {
+            'Authorization': f'Bearer {self.api_token}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+    
+    def _log_api_interaction(self, endpoint, payload, response, error=None):
+        """Log API interactions for debugging and monitoring."""
+        try:
+            WhatsAppLog.objects.create(
+                endpoint=endpoint,
+                request_payload=json.dumps(payload),
+                response_data=json.dumps(response) if response else None,
+                error_message=str(error) if error else None,
+                status_code=response.status_code if response else None
+            )
+        except Exception as e:
+            logger.error(f"Error logging WhatsApp API interaction: {str(e)}")
+    
+    @retry_on_failure(max_retries=3)
+    def send_message(self, phone_number, content, conversation_id=None, media_url=None):
         """
-        Send a message via WhatsApp using generic API.
-        
-        Args:
-            phone_number: Recipient phone number
-            content: Message content
-            conversation_id: Optional conversation ID for tracking
-            
-        Returns:
-            The message object from the API
+        Send a WhatsApp message with retry mechanism and proper error handling.
+        Supports both text and media messages.
         """
-        # Clean up phone number
-        clean_number = self._clean_phone_number(phone_number)
+        endpoint = f"{self.api_url}/messages"
         
-        # Format message for WhatsApp
-        content = self._format_for_whatsapp(content)
+        # Normalize phone number
+        phone_number = self._normalize_phone_number(phone_number)
         
-        # Generate unique message ID for tracking
-        message_id = str(uuid.uuid4())
-            
-        logger.info(f"Sending WhatsApp message to {clean_number}")
+        # Prepare message payload
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": phone_number,
+            "type": "text" if not media_url else "media"
+        }
+        
+        if media_url:
+            payload["media"] = {
+                "link": media_url,
+                "caption": content
+            }
+        else:
+            payload["text"] = {"body": content}
         
         try:
-            # Preparar la solicitud para la API de WhatsApp
-            headers = {
-                'Authorization': f'Bearer {self.api_token}',
-                'Content-Type': 'application/json'
-            }
-            
-            payload = {
-                'messaging_product': 'whatsapp',
-                'recipient_type': 'individual',
-                'to': clean_number,
-                'type': 'text',
-                'text': {
-                    'preview_url': False,
-                    'body': content
-                }
-            }
-            
-            # Enviar mensaje a través de la API
             response = requests.post(
-                f"{self.api_url}/v1/messages",
-                headers=headers,
+                endpoint,
+                headers=self._get_headers(),
                 json=payload
             )
-            
-            # Verificar respuesta
-            if response.status_code not in (200, 201):
-                logger.error(f"Error sending WhatsApp message: {response.status_code}, {response.text}")
-                raise Exception(f"WhatsApp API error: {response.status_code}, {response.text}")
-            
-            # Extraer ID del mensaje de la respuesta
+            response.raise_for_status()
             response_data = response.json()
-            whatsapp_message_id = response_data.get('messages', [{}])[0].get('id', message_id)
             
-            logger.info(f"WhatsApp message sent: {whatsapp_message_id}")
+            # Log the interaction
+            self._log_api_interaction(endpoint, payload, response)
             
-            # Track the message if we have a conversation ID
-            if conversation_id:
-                try:
-                    conversation = Conversation.objects.get(id=conversation_id)
-                    # Create a message record if one doesn't exist
-                    message, created = Message.objects.get_or_create(
-                        conversation=conversation,
-                        content=content,
-                        direction='OUT',
-                        defaults={'ai_processed': True}
-                    )
-                    
-                    # Create WhatsApp tracking record
-                    whatsapp_message = WhatsAppMessage.objects.create(
-                        message=message,
-                        whatsapp_message_id=whatsapp_message_id,
-                        status='SENT'
-                    )
-                    
-                    # Log the message sending event
-                    WhatsAppLog.objects.create(
-                        message=whatsapp_message,
-                        event_type='SENT',
-                        description=f"Message sent to {clean_number}"
-                    )
-                    
-                    logger.info(f"Created WhatsApp tracking record: {whatsapp_message.id}")
-                except Exception as db_error:
-                    logger.error(f"Error tracking WhatsApp message in database: {str(db_error)}")
+            # Extract message ID from the response
+            message_id = response_data.get('messages', [{}])[0].get('id')
             
-            # Crear un objeto similar a la respuesta de Twilio para mantener compatibilidad
-            class ApiResponse:
-                def __init__(self, sid):
-                    self.sid = sid
-                    
-            return ApiResponse(whatsapp_message_id)
-        except Exception as e:
-            logger.error(f"Error sending WhatsApp message: {str(e)}")
+            # Create WhatsApp message record
+            whatsapp_message = WhatsAppMessage.objects.create(
+                phone_number=phone_number,
+                content=content,
+                media_url=media_url,
+                message_id=message_id,
+                status='SENT',
+                conversation_id=conversation_id
+            )
+            
+            # Add sid property to the WhatsAppMessage object to maintain compatibility with existing code
+            whatsapp_message.sid = message_id
+            
+            return whatsapp_message
+            
+        except RequestException as e:
+            self._log_api_interaction(endpoint, payload, None, error=e)
             raise
     
     def verify_webhook_signature(self, request):
-        """
-        Verifica la firma del webhook para asegurar que la solicitud es legítima
-        
-        Args:
-            request: Django request object
-            
-        Returns:
-            bool: True si la firma es válida
-        """
-        if not self.webhook_secret:
-            logger.warning("Webhook secret not configured, skipping signature verification")
-            return True
+        """Verify the authenticity of incoming webhook requests."""
+        signature = request.headers.get('X-Hub-Signature-256', '')
+        if not signature or not signature.startswith('sha256='):
+            return False
             
         try:
-            # Obtener la firma del encabezado
-            signature = request.headers.get('X-Hub-Signature-256', '')
-            if not signature.startswith('sha256='):
-                logger.warning("Invalid signature format")
-                return False
-                
-            signature = signature[7:]  # Quita 'sha256='
+            # Get the signature from the header
+            received_signature = signature.split('sha256=')[1]
             
-            # Calcular el HMAC usando el cuerpo de la solicitud y el secreto
-            body = request.body
+            # Calculate expected signature
             expected_signature = hmac.new(
                 self.webhook_secret.encode('utf-8'),
-                body,
+                request.body,
                 hashlib.sha256
             ).hexdigest()
             
-            # Comparar firmas (constante-time para evitar timing attacks)
-            return hmac.compare_digest(signature, expected_signature)
+            # Compare signatures using hmac.compare_digest to prevent timing attacks
+            return hmac.compare_digest(received_signature, expected_signature)
+            
         except Exception as e:
             logger.error(f"Error verifying webhook signature: {str(e)}")
             return False
     
-    def handle_incoming_message(self, sender_phone, message_content, message_sid):
-        """
-        Handle an incoming WhatsApp message by creating/retrieving conversation
-        and using the chat processor to process it.
-        
-        Args:
-            sender_phone: Sender's phone number
-            message_content: Message content
-            message_sid: Message ID for tracking
-            
-        Returns:
-            tuple: (user_message, conversation)
-        """
-        from apps.agents.models import AgentProfile
-        
-        # Clean up phone number
-        clean_number = self._clean_phone_number(sender_phone)
-        
-        # Find or create conversation for this client
-        conversation = Conversation.objects.filter(client_phone=clean_number, is_active=True).first()
-        
-        if not conversation:
-            # Get available agent
-            agent = AgentProfile.objects.filter(is_active=True).first()
-            if not agent:
-                logger.error("No active agent found for new WhatsApp conversation")
-                raise ValueError("No active agents available to handle this conversation")
-            
-            # Create new conversation
-            conversation = Conversation.objects.create(
-                agent=agent,
-                client_phone=clean_number,
-                is_active=True,
-                thread_id=message_sid  # Use message_sid as thread_id for tracking
-            )
-            logger.info(f"Created new conversation {conversation.id} for {clean_number}")
-        
-        # Use the chat processor to handle the incoming message
-        chat_processor = ChatProcessor()
-        user_message, placeholder = chat_processor.handle_incoming_message(
-            message_content,
-            conversation,
-            source='whatsapp'
-        )
-        
-        # Create WhatsApp tracking record
-        whatsapp_message = WhatsAppMessage.objects.create(
-            message=user_message,
-            whatsapp_message_id=message_sid,
-            status='RECEIVED'
-        )
-        
-        # Log the received message
-        WhatsAppLog.objects.create(
-            message=whatsapp_message,
-            event_type='RECEIVED',
-            description=f"Message received from {clean_number}"
-        )
-        
-        # Process the message using our unified task system
-        from apps.chat.tasks import process_message
-        process_message.delay(user_message.id, source='whatsapp')
-        
-        return user_message, conversation
-    
     def parse_webhook_data(self, data):
-        """
-        Parsea los datos del webhook de WhatsApp
-        
-        Args:
-            data: Datos JSON del webhook
-            
-        Returns:
-            list: Lista de mensajes procesados
-        """
-        processed_messages = []
-        
+        """Parse and validate incoming webhook data."""
         try:
-            # Verificar si hay cambios en la mensajería
-            if 'entry' not in data:
-                return processed_messages
-                
-            for entry in data['entry']:
-                if 'changes' not in entry:
-                    continue
+            processed_messages = []
+            
+            # Extract messages from the webhook payload
+            entries = data.get('entry', [])
+            for entry in entries:
+                changes = entry.get('changes', [])
+                for change in changes:
+                    messages = change.get('value', {}).get('messages', [])
                     
-                for change in entry['changes']:
-                    if change.get('field') != 'messages':
-                        continue
-                        
-                    value = change.get('value', {})
-                    
-                    if 'messages' not in value:
-                        # Esto podría ser una actualización de estado
-                        self._process_status_update(value)
-                        continue
-                    
-                    messages = value.get('messages', [])
-                    for msg in messages:
-                        msg_type = msg.get('type')
-                        msg_from = value.get('contacts', [{}])[0].get('wa_id') if value.get('contacts') else None
-                        
-                        if not msg_from:
-                            logger.warning(f"Missing sender in WhatsApp webhook message: {msg}")
-                            continue
-                        
-                        msg_id = msg.get('id', '')
-                        timestamp = msg.get('timestamp', '')
-                        
-                        # Procesar según el tipo de mensaje
-                        if msg_type == 'text':
-                            text = msg.get('text', {}).get('body', '')
-                            processed_messages.append({
-                                'type': 'TEXT',
-                                'from': msg_from,
-                                'id': msg_id,
-                                'timestamp': timestamp,
-                                'content': text
-                            })
-                        elif msg_type == 'image':
-                            media = msg.get('image', {})
-                            url = self._get_media_url(media.get('id')) if media.get('id') else None
-                            caption = media.get('caption', '')
-                            
-                            content = caption if caption else "[Image]"
-                            if url:
-                                content += f"\n[Image: {url}]"
-                                
-                            processed_messages.append({
-                                'type': 'MEDIA',
-                                'from': msg_from,
-                                'id': msg_id,
-                                'timestamp': timestamp,
-                                'content': content,
-                                'media_type': 'image',
-                                'media_url': url
-                            })
-                        elif msg_type in ('audio', 'video', 'document'):
-                            media = msg.get(msg_type, {})
-                            url = self._get_media_url(media.get('id')) if media.get('id') else None
-                            caption = media.get('caption', '') if msg_type != 'audio' else ''
-                            
-                            content = caption if caption else f"[{msg_type.capitalize()}]"
-                            if url:
-                                content += f"\n[{msg_type.capitalize()}: {url}]"
-                                
-                            processed_messages.append({
-                                'type': 'MEDIA',
-                                'from': msg_from,
-                                'id': msg_id,
-                                'timestamp': timestamp,
-                                'content': content,
-                                'media_type': msg_type,
-                                'media_url': url
-                            })
-                        elif msg_type == 'location':
-                            location = msg.get('location', {})
-                            lat = location.get('latitude')
-                            lng = location.get('longitude')
-                            name = location.get('name', '')
-                            address = location.get('address', '')
-                            
-                            content = f"Location: {lat}, {lng}"
-                            if name:
-                                content += f"\nName: {name}"
-                            if address:
-                                content += f"\nAddress: {address}"
-                                
-                            processed_messages.append({
-                                'type': 'LOCATION',
-                                'from': msg_from,
-                                'id': msg_id,
-                                'timestamp': timestamp,
-                                'content': content,
-                                'latitude': lat,
-                                'longitude': lng
-                            })
-                            
+                    for message in messages:
+                        processed_message = self._process_webhook_message(message)
+                        if processed_message:
+                            processed_messages.append(processed_message)
+            
+            return processed_messages
+            
         except Exception as e:
             logger.error(f"Error parsing webhook data: {str(e)}")
-            
-        return processed_messages
+            return []
     
-    def _get_media_url(self, media_id):
-        """
-        Obtiene la URL de un archivo multimedia de WhatsApp
-        
-        Args:
-            media_id: ID del archivo multimedia
-            
-        Returns:
-            str: URL del archivo multimedia
-        """
+    def _process_webhook_message(self, message):
+        """Process individual messages from webhook payload."""
         try:
-            headers = {
-                'Authorization': f'Bearer {self.api_token}'
-            }
+            message_type = message.get('type')
+            message_id = message.get('id')
             
-            response = requests.get(
-                f"{self.api_url}/{media_id}",
-                headers=headers
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"Error getting media URL: {response.status_code}, {response.text}")
+            # Skip if we've already processed this message
+            cache_key = f'whatsapp_msg_{message_id}'
+            if cache.get(cache_key):
                 return None
                 
-            data = response.json()
-            return data.get('url')
+            # Mark message as processed
+            cache.set(cache_key, True, self.cache_timeout)
+            
+            processed_message = {
+                'id': message_id,
+                'from': message.get('from'),
+                'timestamp': message.get('timestamp'),
+                'type': message_type,
+            }
+            
+            if message_type == 'text':
+                processed_message['content'] = message.get('text', {}).get('body', '')
+            elif message_type in ['image', 'video', 'audio', 'document']:
+                media = message.get(message_type, {})
+                processed_message.update({
+                    'content': f"[{message_type.title()}: {media.get('link', '')}]",
+                    'mime_type': media.get('mime_type'),
+                    'media_id': media.get('id')
+                })
+            elif message_type == 'location':
+                location = message.get('location', {})
+                processed_message['content'] = (
+                    f"[Location: {location.get('latitude')}, {location.get('longitude')}]"
+                )
+            
+            return processed_message
+            
         except Exception as e:
-            logger.error(f"Error retrieving media URL: {str(e)}")
+            logger.error(f"Error processing webhook message: {str(e)}")
             return None
     
-    def _process_status_update(self, value):
-        """
-        Procesa actualizaciones de estado de mensajes
-        
-        Args:
-            value: Datos del cambio de estado
-        """
+    def handle_incoming_message(self, sender_phone, message_content, message_sid):
+        """Handle incoming WhatsApp messages and integrate with chat system."""
         try:
-            statuses = value.get('statuses', [])
-            for status in statuses:
-                msg_id = status.get('id')
-                status_type = status.get('status')
-                
-                if not msg_id or not status_type:
-                    continue
-                    
-                # Mapear estados a nuestros estados internos
-                status_map = {
-                    'sent': 'SENT',
-                    'delivered': 'DELIVERED',
-                    'read': 'READ',
-                    'failed': 'FAILED'
-                }
-                
-                internal_status = status_map.get(status_type.lower())
-                if internal_status:
-                    self.update_message_status(msg_id, internal_status)
-        except Exception as e:
-            logger.error(f"Error processing status update: {str(e)}")
-    
-    def _clean_phone_number(self, phone_number):
-        """Clean up a phone number by removing formatting and prefixes"""
-        # Remove whatsapp: prefix if present
-        if phone_number.startswith('whatsapp:'):
-            phone_number = phone_number[9:]
+            # Find or create conversation
+            conversation = Conversation.objects.filter(
+                client_phone=sender_phone,
+                is_active=True
+            ).first()
             
-        # Remove any non-digit characters except +
-        phone_number = re.sub(r'[^\d+]', '', phone_number)
-        
-        # Ensure number starts with + if it's an international number
-        if not phone_number.startswith('+'):
-            if phone_number.startswith('00'):
-                phone_number = '+' + phone_number[2:]
-            elif len(phone_number) > 10:  # Assume it's international but missing +
-                phone_number = '+' + phone_number
+            if not conversation:
+                from apps.agents.models import AgentProfile
+                agent = AgentProfile.objects.filter(is_active=True).first()
                 
-        return phone_number
-    
-    def _format_for_whatsapp(self, content):
-        """Format message content appropriately for WhatsApp"""
-        # Limit length
-        if len(content) > 4000:
-            content = content[:3997] + "..."
-        
-        # Replace multiple newlines with just two
-        content = re.sub(r'\n{3,}', '\n\n', content)
-        
-        # Convert markdown style formatting to WhatsApp formatting
-        # WhatsApp uses *bold*, _italic_, and ~strikethrough~
-        content = re.sub(r'\*\*(.*?)\*\*', r'*\1*', content)  # Convert **bold** to *bold*
-        content = re.sub(r'__(.*?)__', r'_\1_', content)      # Convert __italic__ to _italic_
-        
-        return content
-        
-    def update_message_status(self, whatsapp_message_id, status):
-        """
-        Update the status of a WhatsApp message
-        
-        Args:
-            whatsapp_message_id: The WhatsApp Message ID
-            status: The new status ('DELIVERED', 'READ', 'FAILED')
-            
-        Returns:
-            bool: Success status
-        """
-        try:
-            whatsapp_message = WhatsAppMessage.objects.get(whatsapp_message_id=whatsapp_message_id)
-            whatsapp_message.status = status
-            
-            if status == 'DELIVERED':
-                whatsapp_message.delivered_at = timezone.now()
-            elif status == 'READ':
-                whatsapp_message.read_at = timezone.now()
+                if not agent:
+                    logger.error("No active agents available")
+                    return None, None
                 
-            whatsapp_message.save()
+                conversation = Conversation.objects.create(
+                    agent=agent,
+                    client_phone=sender_phone,
+                    is_active=True
+                )
             
-            # Log status update
-            WhatsAppLog.objects.create(
-                message=whatsapp_message,
-                event_type=f'STATUS_{status}',
-                description=f"Message status updated to {status}"
+            # Create message record
+            user_message = Message.objects.create(
+                conversation=conversation,
+                content=message_content,
+                direction='IN',
+                timestamp=timezone.now()
             )
             
-            return True
+            # Create WhatsApp message record
+            WhatsAppMessage.objects.create(
+                phone_number=sender_phone,
+                content=message_content,
+                message_id=message_sid,
+                status='RECEIVED',
+                conversation=conversation
+            )
             
-        except WhatsAppMessage.DoesNotExist:
-            logger.error(f"WhatsApp message with ID {whatsapp_message_id} not found")
-            return False
+            return user_message, conversation
+            
         except Exception as e:
-            logger.error(f"Error updating WhatsApp message status: {str(e)}")
-            return False
-
-# This is now superseded by the unified process_message task in apps.chat.tasks
-# Kept for backwards compatibility, but redirects to the unified system
-@shared_task
-def process_incoming_message(message_id):
-    """Legacy task - use apps.chat.tasks.process_message instead"""
-    from apps.chat.tasks import process_message
-    logger.warning("Using deprecated process_incoming_message task, use apps.chat.tasks.process_message instead")
-    process_message.delay(message_id, source='whatsapp_legacy')
+            logger.error(f"Error handling incoming WhatsApp message: {str(e)}")
+            raise
+    
+    @staticmethod
+    def _normalize_phone_number(phone):
+        """Normalize phone numbers to WhatsApp's expected format."""
+        # Remove any non-digit characters
+        phone = ''.join(filter(str.isdigit, phone))
+        
+        # Ensure it starts with country code
+        if not phone.startswith('1') and not phone.startswith('52'):
+            phone = '52' + phone
+        
+        return phone
